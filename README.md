@@ -1,6 +1,6 @@
 # Zigrograd -- scalar-valued autograd written in Zig
 
-A small auto-diffing neural network example written in Zig.  Inspired by [micrograd](https://github.com/karpathy/micrograd).
+A small auto-diffing neural network example written in Zig.  Heavily inspired by [micrograd](https://github.com/karpathy/micrograd).
 
 It's a toy, written just for learning purposes!  For a CPU-only scalar-valued autograd engine, it's fast, but it's no match for real tensor-based frameworks.
 

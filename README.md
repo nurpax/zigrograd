@@ -12,7 +12,7 @@ A reference implementation of pretty much the same thing can be found in [pytorc
 
 ## How to run it
 
-1. Initial setup: `python download_mnist.py` to get training data
+1. Initial setup: `python download_mnist.py` to download the MNIST dataset
 2. Start training: `zig build run -Doptimize=ReleaseFast`
 
 Most of the time you want to be running in ReleaseFast mode, as the default debug build is a lot slower.

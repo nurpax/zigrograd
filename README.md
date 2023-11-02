@@ -2,7 +2,7 @@
 
 A small auto-diffing neural network example written in Zig.  Heavily inspired by [micrograd](https://github.com/karpathy/micrograd).
 
-It's a toy, written just for learning purposes!  For a CPU-only scalar-valued autograd engine, it's fast, but it's no match for real tensor-based frameworks.
+It's a toy, written just for learning purposes!  It's pretty fast for what it is (==CPU-only scalar-valued autograd engine) but no match for real tensor-based frameworks.
 
 ## Example
 

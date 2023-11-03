@@ -179,7 +179,10 @@ pub fn trainClassifier(init_pool: *zg.NodePool, fwd: *zg.NodePool) void {
 }
 
 pub fn main() !void {
-    time.init();
+    time.init() catch {
+        std.debug.print("failed to initialize timer\n", .{});
+        return;
+    };
 
     var init_pool = zg.NodePool.init(gpa.allocator());
     defer init_pool.deinit();

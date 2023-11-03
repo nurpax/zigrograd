@@ -1,35 +1,31 @@
-pub extern fn stm_setup() void;
-pub extern fn stm_now() u64;
-pub extern fn stm_since(prev: u64) u64;
-pub extern fn stm_sec(prev: u64) f64;
-pub extern fn stm_ms(prev: u64) f64;
-pub extern fn stm_us(prev: u64) f64;
-pub extern fn stm_ns(prev: u64) f64;
+const std = @import("std");
 
-pub fn init() void {
-    stm_setup();
+var timer: std.time.Timer = undefined;
+
+pub fn init() !void {
+    timer = try std.time.Timer.start();
 }
 
 pub fn now() u64 {
-    return stm_now();
+    return timer.read();
 }
 
 pub fn since(prev: u64) u64 {
-    return stm_since(prev);
+    return now() - prev;
 }
 
 pub fn to_sec(t: u64) f64 {
-    return stm_sec(t);
+    return @as(f64, @floatFromInt(t)) / 1e9;
 }
 
 pub fn to_ms(t: u64) f64 {
-    return stm_ms(t);
+    return @as(f64, @floatFromInt(t)) / 1e6;
 }
 
 pub fn to_us(t: u64) f64 {
-    return stm_us(t);
+    return @as(f64, @floatFromInt(t)) / 1e3;
 }
 
 pub fn to_ns(t: u64) f64 {
-    return stm_ns(t);
+    return @as(f64, @floatFromInt(t));
 }

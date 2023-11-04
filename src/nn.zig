@@ -36,7 +36,7 @@ pub fn NestedModuleIterator(comptime Module: type) type {
             if (outer_it.next()) |out| {
                 return @This(){
                     .outer_it = outer_it,
-                    .inner_it = @constCast(&out).parameters(),
+                    .inner_it = out.parameters(),
                 };
             }
             unreachable; // should not happen: empty iterator

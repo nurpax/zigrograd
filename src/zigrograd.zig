@@ -25,12 +25,12 @@ const Expr = union(ExprKind) {
     imm: f32,
     unop: struct {
         op: UnopKind,
-        arg0: *const Value,
+        arg0: *Value,
     },
     binop: struct {
         op: BinopKind,
-        arg0: *const Value,
-        arg1: *const Value,
+        arg0: *Value,
+        arg1: *Value,
     },
 };
 
@@ -45,35 +45,35 @@ pub const Value = struct {
             Expr.unop => |expr| {
                 switch (expr.op) {
                     UnopKind.exp => {
-                        @constCast(expr.arg0).grad += @exp(expr.arg0.data) * self.grad;
+                        expr.arg0.grad += @exp(expr.arg0.data) * self.grad;
                     },
                     UnopKind.log => {
-                        @constCast(expr.arg0).grad += (1.0 / expr.arg0.data) * self.grad;
+                        expr.arg0.grad += (1.0 / expr.arg0.data) * self.grad;
                     },
                     UnopKind.relu => {
                         const g = if (self.data > 0) self.grad else 0;
-                        @constCast(expr.arg0).grad += g;
+                        expr.arg0.grad += g;
                     },
                 }
             },
             Expr.binop => |expr| {
                 switch (expr.op) {
                     BinopKind.add => {
-                        @constCast(expr.arg0).grad += self.grad;
-                        @constCast(expr.arg1).grad += self.grad;
+                        expr.arg0.grad += self.grad;
+                        expr.arg1.grad += self.grad;
                     },
                     BinopKind.sub => {
-                        @constCast(expr.arg0).grad += self.grad;
-                        @constCast(expr.arg1).grad -= self.grad;
+                        expr.arg0.grad += self.grad;
+                        expr.arg1.grad -= self.grad;
                     },
                     BinopKind.mul => {
-                        @constCast(expr.arg0).grad += expr.arg1.data * self.grad;
-                        @constCast(expr.arg1).grad += expr.arg0.data * self.grad;
+                        expr.arg0.grad += expr.arg1.data * self.grad;
+                        expr.arg1.grad += expr.arg0.data * self.grad;
                     },
                     BinopKind.pow_imm => {
                         std.debug.assert(expr.arg1.expr == .imm); // only immediate field supported for now
                         const e = expr.arg1.expr.imm;
-                        @constCast(expr.arg0).grad += (e * std.math.pow(f32, expr.arg0.data, (e - 1))) * self.grad;
+                        expr.arg0.grad += (e * std.math.pow(f32, expr.arg0.data, (e - 1))) * self.grad;
                     },
                 }
             },
@@ -113,12 +113,12 @@ pub const Backward = struct {
     const Set = PointerSet(*const Value, false);
     //const Set = PointerSet(*const Value, true);
 
-    topo: std.ArrayList(*const Value),
+    topo: std.ArrayList(*Value),
     visited: Set,
 
     pub fn init(alloc: std.mem.Allocator) Backward {
         return Backward{
-            .topo = std.ArrayList(*const Value).init(alloc),
+            .topo = std.ArrayList(*Value).init(alloc),
             .visited = Set.init(alloc),
         };
     }
@@ -128,7 +128,7 @@ pub const Backward = struct {
         self.visited.deinit();
     }
 
-    fn backward_rec(self: *@This(), root: *const Value) void {
+    fn backward_rec(self: *@This(), root: *Value) void {
         if (!self.visited.insert(root)) {
             switch (root.expr) {
                 Expr.unop => |op| {
@@ -156,9 +156,9 @@ pub const Backward = struct {
 
         // Backprop.
         root.grad = 1;
-        const topo = self.topo.items;
+        var topo = self.topo.items;
         for (self.topo.items, 0..) |_, idx| {
-            @constCast(topo[topo.len - idx - 1]).backward_node();
+            topo[topo.len - idx - 1].backward_node();
         }
     }
 };
@@ -195,11 +195,11 @@ pub const NodePool = struct {
     }
 
     fn unop(p: *NodePool, op: UnopKind, a: *const Value, data: f32) *Value {
-        return new(p, Expr{ .unop = .{ .op = op, .arg0 = a } }, data);
+        return new(p, Expr{ .unop = .{ .op = op, .arg0 = @constCast(a) } }, data);
     }
 
     fn binop(p: *NodePool, op: BinopKind, a: *const Value, b: *const Value, data: f32) *Value {
-        return new(p, Expr{ .binop = .{ .op = op, .arg0 = a, .arg1 = b } }, data);
+        return new(p, Expr{ .binop = .{ .op = op, .arg0 = @constCast(a), .arg1 = @constCast(b) } }, data);
     }
 
     pub fn add(p: *NodePool, a: *const Value, b: *const Value) *Value {

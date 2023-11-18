@@ -4,43 +4,36 @@ const zg = @import("./zigrograd.zig");
 const nn = @import("./nn.zig");
 const mnist = @import("./mnist.zig");
 const time = @import("./time.zig");
+const Ndarray = @import("./ndarray.zig").Ndarray;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 12 }){};
 
 pub const Model = struct {
     linears: [3]nn.Layer,
-    out: [10]*zg.Value,
+    bcast_tmp: []*zg.Tensor,
 
     pub const ParamIterator = nn.NestedModuleIterator(nn.Layer);
 
     pub fn init(pool: *zg.NodePool) Model {
+        var tmp = pool.arena.allocator().alloc(*zg.Tensor, 10) catch unreachable;
         return Model{
+            .bcast_tmp = tmp,
             .linears = .{
                 nn.Layer.init(pool, 28 * 28, 50, true),
                 nn.Layer.init(pool, 50, 50, true),
                 nn.Layer.init(pool, 50, 10, false),
             },
-            .out = .{undefined} ** 10,
         };
     }
 
-    pub fn forward(self: *@This(), pool: *zg.NodePool, x: []*const zg.Value) []*zg.Value {
+    pub fn forward(self: *@This(), pool: *zg.NodePool, x: *const zg.Tensor) *zg.Tensor {
         var tmp = self.linears[0].forward(pool, x);
         tmp = self.linears[1].forward(pool, tmp);
         tmp = self.linears[2].forward(pool, tmp);
 
-        @memcpy(&self.out, tmp);
-
         // logsoftmax = logits - log(reduce_sum(exp(logits), axis))
-        var softmax_sum = pool.c(0);
-        for (tmp) |tmp_i| {
-            softmax_sum = pool.add(softmax_sum, pool.exp(tmp_i));
-        }
-        const sum_log = pool.log(softmax_sum);
-        for (self.out, 0..) |out_i, i| {
-            self.out[i] = pool.sub(out_i, sum_log);
-        }
-        return &self.out;
+        var softmax_sum = pool.sum(pool.exp(tmp), .{});
+        return pool.sub(tmp, pool.log(softmax_sum));
     }
 
     pub fn parameters(self: *const @This()) ParamIterator {
@@ -48,42 +41,45 @@ pub const Model = struct {
     }
 };
 
-pub fn argmax(arr: []*const zg.Value) usize {
-    var m = arr[0].data;
-    var max_idx: usize = 0;
-    var idx: usize = 1;
-    while (idx < arr.len) : (idx += 1) {
-        const val = arr[idx].data;
-        if (val > m) {
-            m = val;
-            max_idx = idx;
+fn samplesToBatch(pool: *zg.NodePool, samples: []mnist.MnistLoader.Sample) Ndarray(f32) {
+    var pixin = Ndarray(f32).init(pool.arena.allocator(), &[_]usize{ samples.len, 28 * 28 });
+    for (samples, 0..) |s, j| {
+        for (s.pixels, 0..) |pix, i| {
+            const fpix: f32 = @floatFromInt(pix);
+            pixin.set(.{ j, i }, fpix / 127.5 - 1);
         }
     }
-    return max_idx;
+    return pixin;
 }
 
-pub fn validate(pool: *zg.NodePool, model: *Model, dataset: mnist.MnistLoader) void {
+fn validate(pool: *zg.NodePool, model: *Model, dataset: mnist.MnistLoader) void {
+    const batch_size = 4;
     var correct_count: usize = 0;
     const max_samples = dataset.num_samples;
 
     std.debug.print("validating model accuracy: ", .{});
-    for (0..max_samples) |sample_idx| {
+    std.debug.assert(max_samples & 3 == 0);
+    const start = time.now();
+    for (0..max_samples >> 2) |sample_idx| {
         pool.reset();
 
-        const s = dataset.sample(sample_idx);
-        var input: [28 * 28]*zg.Value = undefined;
-        for (s.pixels, 0..) |pix, i| {
-            const fpix: f32 = @floatFromInt(pix);
-            input[i] = pool.c(fpix / 127.5 - 1);
+        var samples: [batch_size]mnist.MnistLoader.Sample = undefined;
+        for (0..batch_size) |i| {
+            samples[i] = dataset.sample(sample_idx * batch_size + i);
         }
+        var batch = samplesToBatch(pool, &samples);
+        var input = pool.tensor(batch);
+        const logits = model.forward(pool, input);
 
-        const logits = model.forward(pool, &input);
-        const label = argmax(logits);
-        if (label == s.label) {
-            correct_count += 1;
+        for (0..batch_size) |bidx| {
+            const s = dataset.sample(sample_idx * batch_size + bidx);
+            const label = logits.data.get(&[_]usize{bidx}).argmax();
+            if (label == s.label) {
+                correct_count += 1;
+            }
         }
     }
-    std.debug.print(" {d:.3}%\n", .{@as(f32, @floatFromInt(correct_count)) / @as(f32, @floatFromInt(max_samples)) * 100.0});
+    std.debug.print(" {d:.3}% elapsed {d:.2} ms\n", .{ @as(f32, @floatFromInt(correct_count)) / @as(f32, @floatFromInt(max_samples)) * 100.0, time.to_ms(time.since(start)) });
 }
 
 pub fn trainClassifier(init_pool: *zg.NodePool, fwd: *zg.NodePool) void {
@@ -129,36 +125,32 @@ pub fn trainClassifier(init_pool: *zg.NodePool, fwd: *zg.NodePool) void {
             // Zero gradients.
             var params_it = model.parameters();
             while (params_it.next()) |p| {
-                p.grad = 0;
+                p.grad.fill(0);
             }
 
-            // Train one minibatch.
-            var mb_loss: f32 = 0.0;
+            // Load a minibatch.
+            var labels: [batch_size]usize = undefined;
+            var samples: [batch_size]mnist.MnistLoader.Sample = undefined;
             for (0..batch_size) |idx| {
                 const sample_idx = batch_idx * batch_size + idx;
-                const sample = loader.sample(shuffle[sample_idx]);
-
-                var input: [28 * 28]*zg.Value = undefined;
-                for (sample.pixels, 0..) |pix, i| {
-                    const fpix: f32 = @floatFromInt(pix);
-                    input[i] = fwd.c(fpix / 127.5 - 1);
-                }
-
-                // Predict logits and compute loss.
-                const pred = model.forward(fwd, &input);
-                const loss = fwd.neg(pred[sample.label]); // TODO is the NLL loss correct?  Seems to work though..
-                mb_loss += loss.data;
-
-                backward.backward(loss);
+                samples[idx] = loader.sample(shuffle[sample_idx]);
+                labels[idx] = samples[idx].label;
             }
-            mb_loss /= batch_size;
+
+            // Predict logits and compute loss.
+            var digits = fwd.tensor(samplesToBatch(fwd, &samples));
+            const pred = model.forward(fwd, digits);
+            var loss = fwd.sum(fwd.neg(fwd.gatherSlice(pred, &labels)), .{});
+            const mb_loss = loss.data.item() / batch_size;
+            backward.backward(fwd.arena.allocator(), loss);
 
             // Update weights.
             const lr = 0.01;
-            const lr_mb = lr / @as(f32, batch_size);
+            const lr_mb = fwd.nd_scalar(lr / @as(f32, batch_size));
             params_it = model.parameters();
             while (params_it.next()) |p| {
-                p.data -= p.grad * lr_mb;
+                p.grad.mul_(lr_mb);
+                p.data.sub_(p.grad);
             }
 
             if (batch_idx % 5 != 0) {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const zg = @import("./zigrograd.zig");
+const Ndarray = @import("./ndarray.zig").Ndarray;
 
 const Value = zg.Value;
 
@@ -42,7 +43,7 @@ pub fn NestedModuleIterator(comptime Module: type) type {
             unreachable; // should not happen: empty iterator
         }
 
-        pub fn next(self: *@This()) ?*zg.Value {
+        pub fn next(self: *@This()) ?*zg.Tensor {
             if (self.inner_it.next()) |p| {
                 return p;
             }
@@ -62,68 +63,47 @@ pub fn NestedModuleIterator(comptime Module: type) type {
     };
 }
 
-pub const Neuron = struct {
-    nonlin: bool,
-    num_in: usize,
-    params: []*zg.Value, // indexing: [0,num_in] = weights, [num_in]=bias
+pub const Layer = struct {
+    pub const ParamIterator = SliceIterator(*zg.Tensor);
 
-    pub const ParamIterator = SliceIterator(*zg.Value);
+    w: *zg.Tensor,
+    b: *zg.Tensor,
 
-    pub fn init(pool: *zg.NodePool, num_in: usize, nonlin: bool) Neuron {
+    num_out: usize,
+    relu: bool,
+    params: []*zg.Tensor,
+
+    pub fn init(pool: *zg.NodePool, num_in: usize, num_out: usize, relu: bool) Layer {
         const scl = 1.0 / @sqrt(@as(f32, @floatFromInt(num_in)));
-        var params = pool.arena.allocator().alloc(*zg.Value, num_in + 1) catch unreachable;
-        for (params) |*p| {
-            const r = zg.Random.uniform() * 2 - 1; // -1,1 range
-            p.* = pool.c(r * scl);
+        var w = Ndarray(f32).init(pool.arena.allocator(), &[_]usize{ num_out, num_in });
+        var b = Ndarray(f32).init(pool.arena.allocator(), &[_]usize{num_out});
+        for (0..num_out) |j| {
+            b.set(.{j}, (zg.Random.uniform() * 2 - 1) * scl);
+            for (0..num_in) |i| {
+                w.set(.{ j, i }, (zg.Random.uniform() * 2 - 1) * scl);
+            }
         }
-        return Neuron{
-            .nonlin = nonlin,
-            .num_in = num_in,
-            .params = params,
+
+        var ret = Layer{
+            .num_out = num_out,
+            .w = pool.tensor(w),
+            .b = pool.tensor(b),
+            .params = pool.arena.allocator().alloc(*zg.Tensor, 2) catch unreachable,
+            .relu = relu,
         };
+        ret.params[0] = ret.b;
+        ret.params[1] = ret.w;
+        return ret;
     }
 
-    pub fn forward(self: *@This(), p: *zg.NodePool, x: []*const zg.Value) *zg.Value {
-        var sum = self.params[self.num_in]; // add bias
-        for (0..self.num_in) |i| {
-            sum = p.add(sum, p.mul(self.params[i], x[i]));
-        }
-        return if (self.nonlin) p.relu(sum) else sum;
+    pub fn forward(self: *@This(), p: *zg.NodePool, x: *const zg.Tensor) *zg.Tensor {
+        var out = p.dot(x, p.transpose(self.w));
+        out = p.add(out, self.b);
+        return if (self.relu) p.relu(out) else out;
     }
 
     pub fn parameters(self: *const @This()) ParamIterator {
         return ParamIterator.init(self.params);
-    }
-};
-
-pub const Layer = struct {
-    pub const ParamIterator = NestedModuleIterator(Neuron);
-
-    neurons: []Neuron,
-    out: []*zg.Value,
-
-    pub fn init(pool: *zg.NodePool, num_in: usize, num_out: usize, nonlin: bool) Layer {
-        var neurons = pool.arena.allocator().alloc(Neuron, num_out) catch unreachable;
-        var out = pool.arena.allocator().alloc(*zg.Value, num_out) catch unreachable;
-        for (0..num_out) |layer_idx| {
-            neurons[layer_idx] = Neuron.init(pool, num_in, nonlin);
-        }
-        return Layer{
-            .neurons = neurons,
-            .out = out,
-        };
-    }
-
-    pub fn forward(self: *@This(), fwd_pool: *zg.NodePool, x: []*const zg.Value) []*zg.Value {
-        for (self.neurons, 0..) |*n, i| {
-            std.debug.assert(n.num_in == x.len);
-            self.out[i] = n.forward(fwd_pool, x);
-        }
-        return self.out;
-    }
-
-    pub fn parameters(self: *const @This()) ParamIterator {
-        return ParamIterator.init(self.neurons);
     }
 };
 

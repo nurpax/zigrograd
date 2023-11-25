@@ -17,7 +17,7 @@ pub fn PtrSet(comptime T: type) type {
         used: usize,
 
         pub fn init(alloc: std.mem.Allocator, init_size: usize) @This() {
-            var table = alloc.alloc(usize, std.math.ceilPowerOfTwoAssert(usize, init_size)) catch unreachable;
+            const table = alloc.alloc(usize, std.math.ceilPowerOfTwoAssert(usize, init_size)) catch unreachable;
             @memset(table, 0);
             return @This(){
                 .alloc = alloc,
@@ -59,8 +59,8 @@ pub fn PtrSet(comptime T: type) type {
         }
 
         fn resize(self: *@This(), new_size: usize) void {
-            var old_table = self.table;
-            var new_table = self.alloc.alloc(usize, new_size) catch unreachable;
+            const old_table = self.table;
+            const new_table = self.alloc.alloc(usize, new_size) catch unreachable;
             @memset(new_table, 0);
 
             self.used = 0;
@@ -92,11 +92,11 @@ test "simplest" {
         var hmap = std.AutoHashMap(*const i32, bool).init(std.testing.allocator);
         defer hmap.deinit();
         for (0..N) |_| {
-            var rndPtr = random.random().int(usize) & 0xfff0;
+            const rndPtr = random.random().int(usize) & 0xfff0;
             if (rndPtr != 0) {
-                var iptr: *const i32 = @ptrFromInt(rndPtr);
+                const iptr: *const i32 = @ptrFromInt(rndPtr);
                 const res = hmap.getOrPut(iptr) catch unreachable;
-                var existing = set.insert(iptr);
+                const existing = set.insert(iptr);
                 try std.testing.expect(existing == res.found_existing);
             }
         }

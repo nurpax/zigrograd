@@ -3,13 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 
-if torch.cuda.is_available():
-    device = torch.device('cuda')
-else:
-    device = torch.device('cpu')
+device = torch.device('cpu')
 
 print('Using PyTorch version:', torch.__version__, ' Device:', device)
-
 
 batch_size = 32
 
@@ -75,6 +71,7 @@ def validate(loss_vector, accuracy_vector):
         data = data.to(device)
         target = target.to(device)
         output = model(data)
+
         val_loss += criterion(output, target).data.item()
         pred = output.data.max(1)[1] # get the index of the max log-probability
         correct += pred.eq(target.data).cpu().sum()
@@ -85,33 +82,37 @@ def validate(loss_vector, accuracy_vector):
     accuracy = 100. * correct.to(torch.float32) / len(validation_loader.dataset)
     accuracy_vector.append(accuracy)
 
-    print('\nValidation set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+    print('\nValidation set: Average loss: {:.4f}, Accuracy: {}/{} ({:.1f}%)\n'.format(
         val_loss, correct, len(validation_loader.dataset), accuracy))
 
-class Net(nn.Module):
+#------------------------------------------------------------------------
+
+class ConvoNet(nn.Module):
     def __init__(self):
-        super(Net, self).__init__()
-        self.fc1 = nn.Linear(28*28, 50)
-        self.fc1_drop = nn.Dropout(0.2)
-        self.fc2 = nn.Linear(50, 50)
-        self.fc2_drop = nn.Dropout(0.2)
-        self.fc3 = nn.Linear(50, 10)
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, bias=True)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, bias=True)
+        self.fc1   = nn.Linear(1600, 10)
 
     def forward(self, x):
-        x = x.view(-1, 28*28)
-        x = F.relu(self.fc1(x))
-        x = self.fc1_drop(x)
-        x = F.relu(self.fc2(x))
-        x = self.fc2_drop(x)
-        return F.log_softmax(self.fc3(x), dim=1)
+        x = x.view(-1, 1, 28, 28)
+        x = F.relu(self.conv1(x))
+        x = F.avg_pool2d(x, 2)
+        x = F.relu(self.conv2(x))
+        x = F.avg_pool2d(x, 2)
+        x = x.view(x.size(0), -1)
+        x = self.fc1(x)
+        return F.log_softmax(x, dim=1)
 
-model = Net().to(device)
-optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
+#------------------------------------------------------------------------
+
+model = ConvoNet().to(device)
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01) # , momentum=0.5)
 criterion = nn.CrossEntropyLoss()
 
 print(model)
 
-epochs = 10
+epochs = 20
 
 lossv, accv = [], []
 for epoch in range(1, epochs + 1):

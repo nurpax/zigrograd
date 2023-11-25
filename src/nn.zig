@@ -16,6 +16,10 @@ pub fn SliceIterator(comptime C: type) type {
             };
         }
 
+        pub fn len(self: @This()) usize {
+            return self.arr.len;
+        }
+
         pub fn next(self: *@This()) ?C {
             if (self.index < self.arr.len) {
                 const idx = self.index;
@@ -69,7 +73,6 @@ pub const Layer = struct {
     w: *zg.Tensor,
     b: *zg.Tensor,
 
-    num_out: usize,
     relu: bool,
     params: []*zg.Tensor,
 
@@ -85,7 +88,6 @@ pub const Layer = struct {
         }
 
         var ret = Layer{
-            .num_out = num_out,
             .w = pool.tensor(w),
             .b = pool.tensor(b),
             .params = pool.arena.allocator().alloc(*zg.Tensor, 2) catch unreachable,
@@ -100,6 +102,61 @@ pub const Layer = struct {
         var out = p.dot(x, p.transpose(self.w));
         out = p.add(out, self.b);
         return if (self.relu) p.relu(out) else out;
+    }
+
+    pub fn parameters(self: *const @This()) ParamIterator {
+        return ParamIterator.init(self.params);
+    }
+};
+
+pub const Conv2d = struct {
+    pub const Options = struct {
+        bias: bool = true,
+    };
+    pub const ParamIterator = SliceIterator(*zg.Tensor);
+
+    w: *zg.Tensor,
+    b: ?*zg.Tensor,
+
+    params: []*zg.Tensor,
+
+    pub fn init(pool: *zg.NodePool, num_in: usize, num_out: usize, kernel: usize, opts: Options) @This() {
+        const fan_in: f32 = @floatFromInt(num_in * kernel * kernel);
+        const scl = 1.0 / @sqrt(fan_in);
+        var w = Ndarray(f32).init(pool.arena.allocator(), &[_]usize{ num_out, num_in, kernel, kernel });
+        const b = if (opts.bias) Ndarray(f32).init(pool.arena.allocator(), &[_]usize{num_out}) else null;
+        for (0..num_out) |i| {
+            if (b) |bb| {
+                bb.set(.{i}, (zg.Random.uniform() * 2 - 1) * scl);
+            }
+            for (0..num_in) |j| {
+                for (0..kernel) |kj| {
+                    for (0..kernel) |ki| {
+                        w.set(.{ i, j, kj, ki }, (zg.Random.uniform() * 2 - 1) * scl);
+                    }
+                }
+            }
+        }
+
+        var ret = @This(){
+            .w = pool.tensor(w),
+            .b = if (b) |bb| pool.tensor(bb) else null,
+            .params = pool.arena.allocator().alloc(*zg.Tensor, if (opts.bias) 2 else 1) catch unreachable,
+        };
+        ret.params[0] = ret.w;
+        if (ret.b) |bb| {
+            ret.params[1] = bb;
+        }
+        return ret;
+    }
+
+    pub fn forward(self: *@This(), p: *zg.NodePool, x: *const zg.Tensor) *zg.Tensor {
+        // TODO options
+        var out = p.conv2d(x, self.w, .{});
+        if (self.b) |bb| {
+            out = p.add(out, p.reshape(bb, &[_]usize{ 1, self.w.shape()[0], 1, 1 }));
+        }
+        return out;
     }
 
     pub fn parameters(self: *const @This()) ParamIterator {

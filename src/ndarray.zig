@@ -20,8 +20,30 @@ const FixedBufSliceAlloc = struct {
     }
 };
 
+pub fn compareShapes(a: []usize, b: []usize) bool {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (a, b) |ad, bd| {
+        if (ad != bd) {
+            return false;
+        }
+    }
+    return true;
+}
+
 pub const TransposeOpts = struct {
     axes: ?[]const usize = null,
+};
+
+pub const Conv2dOpts = struct {
+    stride: usize = 1,
+    pad: usize = 0,
+};
+
+pub const Conv2dGrads = struct {
+    dw: Ndarray(f32),
+    dx: Ndarray(f32),
 };
 
 pub fn Ndarray(comptime Dtype: type) type {
@@ -42,7 +64,7 @@ pub fn Ndarray(comptime Dtype: type) type {
                     return null;
                 }
                 self.index += 1;
-                var ptr: *Dtype = @ptrFromInt(@intFromPtr(self.arr.buf.ptr) + self.data_ptr * @sizeOf(Dtype));
+                const ptr: *Dtype = @ptrFromInt(@intFromPtr(self.arr.buf.ptr) + self.data_ptr * @sizeOf(Dtype));
 
                 var ii = self.nd_m1;
                 while (ii >= 0) : (ii -= 1) {
@@ -73,15 +95,7 @@ pub fn Ndarray(comptime Dtype: type) type {
         };
 
         pub fn equalShapes(a: @This(), b: @This()) bool {
-            if (a.shape.len != b.shape.len) {
-                return false;
-            }
-            for (a.shape, b.shape) |ad, bd| {
-                if (ad != bd) {
-                    return false;
-                }
-            }
-            return true;
+            return compareShapes(a.shape, b.shape);
         }
 
         pub fn iterator(self: *const @This(), opts: Iter.Opts) Iter {
@@ -147,7 +161,7 @@ pub fn Ndarray(comptime Dtype: type) type {
             return stride_prod;
         }
         pub fn init(alloc: std.mem.Allocator, shape: []const usize) @This() {
-            var strides = alloc.alloc(usize, shape.len) catch unreachable;
+            const strides = alloc.alloc(usize, shape.len) catch unreachable;
             const stride_prod = @This().initStrides(strides, shape);
             return @This(){
                 .buf = alloc.alloc(Dtype, stride_prod) catch unreachable,
@@ -195,13 +209,13 @@ pub fn Ndarray(comptime Dtype: type) type {
         }
 
         pub fn zerosLike(self: *const Ndarray(Dtype), alloc: std.mem.Allocator) @This() {
-            var arr = self.emptyLike(alloc);
+            const arr = self.emptyLike(alloc);
             @memset(arr.buf, 0);
             return arr;
         }
 
         pub fn onesLike(self: *const Ndarray(Dtype), alloc: std.mem.Allocator) @This() {
-            var arr = self.emptyLike(alloc);
+            const arr = self.emptyLike(alloc);
             @memset(arr.buf, 1);
             return arr;
         }
@@ -212,25 +226,28 @@ pub fn Ndarray(comptime Dtype: type) type {
             return arr;
         }
 
+        // idx can be either a tuple like .{ 0, 3} or a []usize slice.
         pub fn offset(self: *const @This(), idx: anytype) usize {
+            const info = @typeInfo(@TypeOf(idx));
             var offs: usize = self.offs;
-            inline for (idx, 0..) |idx_i, i| {
-                offs += idx_i * self.strides[i];
+            if (info == .Struct) {
+                if (!info.Struct.is_tuple) {
+                    @compileError("Expected input idx to be a tuple-type");
+                }
+                inline for (idx, 0..) |idx_i, i| {
+                    offs += idx_i * self.strides[i];
+                }
+                return offs;
             }
-            return offs;
-        }
-
-        // TODO combine tuple and slice
-        pub fn offset2(self: *const @This(), idx: []const usize) usize {
-            var offs: usize = self.offs;
+            // Not a tuple, assume it's a slice.
             for (idx, 0..) |idx_i, i| {
                 offs += idx_i * self.strides[i];
             }
             return offs;
         }
 
-        pub fn get(self: *const @This(), idx: []const usize) @This() {
-            const offs = self.offset2(idx);
+        pub fn get(self: *const @This(), idx: anytype) @This() {
+            const offs = self.offset(idx);
             return @This(){
                 .strides = self.strides[idx.len..],
                 .shape = self.shape[idx.len..],
@@ -238,6 +255,22 @@ pub fn Ndarray(comptime Dtype: type) type {
                 .contiguous = self.contiguous,
                 .buf = self.buf[offs..(offs + @This().shapeProd(self.shape[idx.len..]))],
             };
+        }
+
+        pub fn getItem(self: *const @This(), idx: anytype) Dtype {
+            std.debug.assert(idx.len == self.shape.len);
+            const offs = self.offset(idx);
+            return self.buf[offs];
+        }
+
+        pub fn getContigousSlice(self: *const @This(), idx: anytype) []Dtype {
+            const offs = self.offset(idx);
+            std.debug.assert(self.contiguous);
+            return self.buf[offs..(offs + @This().shapeProd(self.shape[idx.len..]))];
+        }
+
+        pub fn set(self: *const @This(), idx: anytype, v: Dtype) void {
+            self.buf[self.offset(idx)] = v;
         }
 
         pub fn assign(self: *@This(), other: @This()) void {
@@ -257,10 +290,6 @@ pub fn Ndarray(comptime Dtype: type) type {
         pub fn item(self: *const @This()) Dtype {
             std.debug.assert(self.shape.len == 0 or (self.shape.len == 1 and self.shape[0] == 1));
             return self.buf[self.offs];
-        }
-
-        pub fn set(self: *const @This(), idx: anytype, v: Dtype) void {
-            self.buf[self.offset(idx)] = v;
         }
 
         pub fn fill(self: *const @This(), v: Dtype) void {
@@ -284,8 +313,8 @@ pub fn Ndarray(comptime Dtype: type) type {
 
             for (0..new_shape.len) |ii| {
                 const i = new_shape.len - 1 - ii;
-                var s0 = if (ai >= 0) shape_a[@intCast(ai)] else 1;
-                var s1 = if (bi >= 0) shape_b[@intCast(bi)] else 1;
+                const s0 = if (ai >= 0) shape_a[@intCast(ai)] else 1;
+                const s1 = if (bi >= 0) shape_b[@intCast(bi)] else 1;
                 new_shape[i] = @max(s0, s1);
                 ai -= 1;
                 bi -= 1;
@@ -295,7 +324,7 @@ pub fn Ndarray(comptime Dtype: type) type {
 
         fn binop(op: ndvec.Binop, alloc: std.mem.Allocator, a: @This(), b: @This()) @This() {
             if (a.contiguous and b.contiguous and a.equalShapes(b)) {
-                var dst = a.emptyLike(alloc);
+                const dst = a.emptyLike(alloc);
                 ndvec.binop(op, dst.buf, 1, @This().shapeProd(dst.shape), a.buf[a.offs..], 1, b.buf[b.offs..], 1);
                 return dst;
             }
@@ -429,7 +458,7 @@ pub fn Ndarray(comptime Dtype: type) type {
             var idx: usize = 0;
             var m = -std.math.inf(f32);
             while (it.next()) |src| : (idx += 1) {
-                var val = src.*;
+                const val = src.*;
                 if (val > m) {
                     m = val;
                     max_idx = idx;
@@ -533,9 +562,9 @@ pub fn Ndarray(comptime Dtype: type) type {
                 return @This().scalar(alloc, s);
             } else if (a.shape.len == 2 and b.shape.len == 1) {
                 var dst = @This().init(alloc, &[_]usize{a.shape[0]});
-                std.debug.assert(@This().equalShapes(a.get(&[_]usize{0}), b));
+                std.debug.assert(compareShapes(a.shape[1..], b.shape));
                 for (0..a.shape[0]) |i| {
-                    const aa = a.get(&[_]usize{i});
+                    const aa = a.get(.{i});
                     const s = ndvec.innerProduct(aa.buf, aa.strides[0], aa.shape[0], b.buf, b.strides[0]);
                     dst.set(.{i}, s);
                 }
@@ -549,9 +578,9 @@ pub fn Ndarray(comptime Dtype: type) type {
                     for (0..a.shape[0]) |_| {
                         var outer_b = b.offset(.{});
                         var inner_d = outer_d;
-                        var a_buf = a.buf[outer_a..];
+                        const a_buf = a.buf[outer_a..];
                         for (0..b.shape[1]) |_| {
-                            dst.buf[inner_d] = ndvec.innerProductStride1(a_buf, a.shape[1], b.buf[outer_b..]);
+                            dst.buf[inner_d] = ndvec.innerProductStride1(a_buf.ptr, a.shape[1], b.buf[outer_b..].ptr);
                             inner_d += dst.strides[1];
                             outer_b += b.strides[1];
                         }
@@ -562,7 +591,7 @@ pub fn Ndarray(comptime Dtype: type) type {
                     for (0..a.shape[0]) |_| {
                         var outer_b = b.offset(.{});
                         var inner_d = outer_d;
-                        var a_buf = a.buf[outer_a..];
+                        const a_buf = a.buf[outer_a..];
                         for (0..b.shape[1]) |_| {
                             dst.buf[inner_d] = ndvec.innerProduct(a_buf, a.strides[1], a.shape[1], b.buf[outer_b..], b.strides[0]);
                             inner_d += dst.strides[1];
@@ -608,6 +637,258 @@ pub fn Ndarray(comptime Dtype: type) type {
             }
             return new_arr;
         }
+
+        pub fn padForConv2d(self: *const @This(), alloc: std.mem.Allocator, padding: usize) @This() {
+            _ = alloc;
+            // implement zero padding like: np.pad(x, ((0, 0), (0, 0), (pad, pad), (pad, pad)), mode='constant')
+            std.debug.assert(padding == 0); // TODO pad all sides
+            return self.*;
+        }
+
+        // x: Input  (shape: N, C, H, W)
+        // w: Weights (shape: F, C, HH, WW)
+        pub fn conv2d(alloc: std.mem.Allocator, x: @This(), w: @This(), opts: Conv2dOpts) @This() {
+            std.debug.assert(x.shape.len == 4);
+            const N = x.shape[0];
+            const C = x.shape[1];
+            const H = x.shape[2];
+            const W = x.shape[3];
+
+            const C_out = w.shape[0];
+            const C_in = w.shape[1];
+            std.debug.assert(C_in == C);
+            const kh = w.shape[2];
+            const kw = w.shape[3];
+
+            const stride = opts.stride;
+            const h_out = 1 + (H + 2 * opts.pad - kh) / stride;
+            const w_out = 1 + (W + 2 * opts.pad - kw) / stride;
+
+            const x_padded = x.padForConv2d(alloc, opts.pad);
+            const out = @This().init(alloc, &[_]usize{ N, C_out, h_out, w_out });
+
+            const xtmp = alloc.alloc(Dtype, C * kh * kw) catch unreachable;
+            std.debug.assert(x_padded.strides[3] == 1);
+
+            // Try to tell the compiler that all the loops are non-zero length.
+            if (N == 0 or C_out == 0 or C == 0 or h_out == 0 or w_out == 0 or kh == 0 or kw == 0) {
+                unreachable;
+            }
+
+            std.debug.assert(kw == 3 and kh == 3); // TODO code below unrolled for 3x3
+
+            const out_slice = out.getContigousSlice(.{});
+            var out_idx: usize = 0;
+            for (0..N) |n| {
+                for (0..C_out) |f| {
+                    const xp_n = x_padded.getContigousSlice(.{n});
+                    const w_slice = w.getContigousSlice(.{f});
+                    for (0..h_out) |i| {
+                        for (0..w_out) |j| {
+                            // Collect pixels for dot product between image patch and the filter kernel.
+                            var xtmpd = xtmp.ptr;
+                            var xpd = xp_n.ptr + (i * stride) * x_padded.strides[2] + (j * stride);
+                            const xpd_stride = x_padded.strides[1] - x_padded.strides[2] * 2;
+                            for (0..C) |_| {
+                                xtmpd[0] = xpd[0];
+                                xtmpd[1] = xpd[1];
+                                xtmpd[2] = xpd[2];
+
+                                xpd += x_padded.strides[2];
+                                xtmpd[3] = xpd[0];
+                                xtmpd[4] = xpd[1];
+                                xtmpd[5] = xpd[2];
+
+                                xpd += x_padded.strides[2];
+                                xtmpd[6] = xpd[0];
+                                xtmpd[7] = xpd[1];
+                                xtmpd[8] = xpd[2];
+
+                                xtmpd += 9;
+                                xpd += xpd_stride;
+                            }
+                            out_slice[out_idx] = ndvec.innerProductStride1(xtmp.ptr, xtmp.len, w_slice.ptr);
+                            out_idx += 1;
+                        }
+                    }
+                }
+            }
+            return out;
+        }
+
+        // x: Input  (shape: N, C, H, W)
+        // w: Weights (shape: F, C, HH, WW)
+        pub fn conv2dBackwards(alloc: std.mem.Allocator, x: @This(), w: @This(), dout: @This(), opts: Conv2dOpts) Conv2dGrads {
+            std.debug.assert(x.shape.len == 4);
+            const N = x.shape[0];
+            const C = x.shape[1];
+
+            const C_out = w.shape[0];
+            const C_in = w.shape[1];
+            std.debug.assert(C_in == C);
+            const kh = w.shape[2];
+            const kw = w.shape[3];
+
+            const stride = opts.stride;
+            const h_out = dout.shape[2];
+            const w_out = dout.shape[3];
+
+            const x_padded = x.padForConv2d(alloc, opts.pad);
+            const dx = x_padded.zerosLike(alloc);
+            const dw = w.zerosLike(alloc);
+
+            const xtmp = alloc.alloc(Dtype, C * kh * kw) catch unreachable;
+
+            std.debug.assert(x_padded.strides[3] == 1);
+
+            // Try to tell the compiler that all the loops are non-zero length.
+            if (N == 0 or C_out == 0 or C == 0 or h_out == 0 or w_out == 0 or kh == 0 or kw == 0) {
+                unreachable;
+            }
+
+            for (0..N) |n| {
+                // dw
+                for (0..h_out) |i| {
+                    const is = i * stride;
+                    for (0..w_out) |j| {
+                        const js = j * stride;
+
+                        var xtmp_idx: usize = 0;
+                        var xpd = x_padded.getContigousSlice(.{ n, 0, is, js }).ptr;
+                        for (0..x_padded.shape[1]) |_| {
+                            xtmp[xtmp_idx + 0] = xpd[0];
+                            xtmp[xtmp_idx + 1] = xpd[1];
+                            xtmp[xtmp_idx + 2] = xpd[2];
+                            xpd += x_padded.strides[2];
+
+                            xtmp[xtmp_idx + 3] = xpd[0];
+                            xtmp[xtmp_idx + 4] = xpd[1];
+                            xtmp[xtmp_idx + 5] = xpd[2];
+                            xpd += x_padded.strides[2];
+
+                            xtmp[xtmp_idx + 6] = xpd[0];
+                            xtmp[xtmp_idx + 7] = xpd[1];
+                            xtmp[xtmp_idx + 8] = xpd[2];
+                            xpd += x_padded.strides[1] - x_padded.strides[2] * 2;
+                            xtmp_idx += 9;
+                        }
+
+                        for (0..w.shape[0]) |f| {
+                            xtmp_idx = 0;
+                            const dw_slice = dw.getContigousSlice(.{f});
+                            const dout_nfij = dout.getItem(.{ n, f, i, j });
+                            // TODO hardcoded for 3x3 kernel size
+                            for (0..x_padded.shape[1]) |_| {
+                                // x_nf_ij = x_nf[:, i*stride:i*stride+HH, j*stride:j*stride+WW]
+                                // dw_nf += x_nf_ij * dout[n, f, i, j]
+                                dw_slice[xtmp_idx + 0] += xtmp[xtmp_idx + 0] * dout_nfij;
+                                dw_slice[xtmp_idx + 1] += xtmp[xtmp_idx + 1] * dout_nfij;
+                                dw_slice[xtmp_idx + 2] += xtmp[xtmp_idx + 2] * dout_nfij;
+                                dw_slice[xtmp_idx + 3] += xtmp[xtmp_idx + 3] * dout_nfij;
+                                dw_slice[xtmp_idx + 4] += xtmp[xtmp_idx + 4] * dout_nfij;
+                                dw_slice[xtmp_idx + 5] += xtmp[xtmp_idx + 5] * dout_nfij;
+                                dw_slice[xtmp_idx + 6] += xtmp[xtmp_idx + 6] * dout_nfij;
+                                dw_slice[xtmp_idx + 7] += xtmp[xtmp_idx + 7] * dout_nfij;
+                                dw_slice[xtmp_idx + 8] += xtmp[xtmp_idx + 8] * dout_nfij;
+                                xtmp_idx += 9;
+                            }
+                        }
+                    }
+                }
+
+                for (0..w.shape[0]) |f| {
+                    const wf_slice = w.getContigousSlice(.{f});
+                    for (0..h_out) |i| {
+                        const is = i * stride;
+                        for (0..w_out) |j| {
+                            const js = j * stride;
+                            const dout_nfij = dout.getItem(.{ n, f, i, j });
+                            var wf_idx: usize = 0;
+                            var dxp = dx.getContigousSlice(.{ n, 0, is, js }).ptr;
+                            // TODO hardcoded for 3x3 kernel size
+                            for (0..x_padded.shape[1]) |_| {
+                                dxp[0] += wf_slice[wf_idx + 0] * dout_nfij;
+                                dxp[1] += wf_slice[wf_idx + 1] * dout_nfij;
+                                dxp[2] += wf_slice[wf_idx + 2] * dout_nfij;
+                                dxp += dx.strides[2];
+
+                                dxp[0] += wf_slice[wf_idx + 3] * dout_nfij;
+                                dxp[1] += wf_slice[wf_idx + 4] * dout_nfij;
+                                dxp[2] += wf_slice[wf_idx + 5] * dout_nfij;
+                                dxp += dx.strides[2];
+
+                                dxp[0] += wf_slice[wf_idx + 6] * dout_nfij;
+                                dxp[1] += wf_slice[wf_idx + 7] * dout_nfij;
+                                dxp[2] += wf_slice[wf_idx + 8] * dout_nfij;
+
+                                wf_idx += 9;
+                                dxp += dx.strides[1] - dx.strides[2] * 2;
+                            }
+                        }
+                    }
+                }
+            }
+            return Conv2dGrads{
+                .dw = dw,
+                .dx = dx,
+            };
+        }
+
+        // x: Input  (shape: N, C, H, W)
+        // hardcoded to kernel size 2, stride 2
+        pub fn avgpool2d(alloc: std.mem.Allocator, x: @This()) @This() {
+            std.debug.assert(x.shape.len == 4);
+            const N = x.shape[0];
+            const C = x.shape[1];
+            const H = x.shape[2];
+            const W = x.shape[3];
+
+            const h_out = H / 2;
+            const w_out = W / 2;
+            const out = @This().init(alloc, &[_]usize{ N, C, h_out, w_out });
+
+            for (0..N) |n| {
+                for (0..C) |c| {
+                    for (0..h_out) |i| {
+                        for (0..w_out) |j| {
+                            var total: f32 = 0;
+                            total += x.getItem(.{ n, c, i * 2, j * 2 });
+                            total += x.getItem(.{ n, c, i * 2, j * 2 + 1 });
+                            total += x.getItem(.{ n, c, i * 2 + 1, j * 2 });
+                            total += x.getItem(.{ n, c, i * 2 + 1, j * 2 + 1 });
+                            out.set(.{ n, c, i, j }, total * 0.25);
+                        }
+                    }
+                }
+            }
+            return out;
+        }
+
+        // x: Input  (shape: N, C, H, W)
+        pub fn avgpool2dBackwards(alloc: std.mem.Allocator, x: @This(), dout: @This()) @This() {
+            std.debug.assert(x.shape.len == 4);
+            const N = dout.shape[0];
+            const C = dout.shape[1];
+            const H = dout.shape[2];
+            const W = dout.shape[3];
+
+            const out = @This().init(alloc, &[_]usize{ N, C, x.shape[2], x.shape[3] });
+
+            for (0..N) |n| {
+                for (0..C) |c| {
+                    for (0..H) |i| {
+                        for (0..W) |j| {
+                            const v = dout.getItem(.{ n, c, i, j }) * 0.25;
+                            out.set(.{ n, c, i * 2, j * 2 }, v);
+                            out.set(.{ n, c, i * 2 + 1, j * 2 }, v);
+                            out.set(.{ n, c, i * 2, j * 2 + 1 }, v);
+                            out.set(.{ n, c, i * 2 + 1, j * 2 + 1 }, v);
+                        }
+                    }
+                }
+            }
+            return out;
+        }
     };
 }
 
@@ -627,7 +908,7 @@ test "tensor1" {
     }
     std.debug.print("\n", .{});
 
-    var ones = t2d.onesLike(arena.allocator());
+    const ones = t2d.onesLike(arena.allocator());
     for (ones.buf) |v| {
         std.debug.print("{d} ", .{v});
     }
@@ -655,14 +936,14 @@ test "2d" {
     std.debug.print("t2d shape {any}\n", .{t2d.shape});
     for (0..t2d.shape[0]) |yi| {
         for (0..t2d.shape[1]) |xi| {
-            std.debug.print("index {} {} {}\n", .{ yi, xi, t2d.get(&[_]usize{ yi, xi }).item() });
-            try std.testing.expectEqual(t2d.get(&[_]usize{ yi, xi }).item(), @floatFromInt(cnt * 2));
+            std.debug.print("index {} {} {}\n", .{ yi, xi, t2d.get(.{ yi, xi }).item() });
+            try std.testing.expectEqual(t2d.get(.{ yi, xi }).item(), @floatFromInt(cnt * 2));
             cnt += 1;
         }
     }
 
-    var dst = t2d.get(&[_]usize{0});
-    const src = t2d.get(&[_]usize{1});
+    var dst = t2d.get(.{0});
+    const src = t2d.get(.{1});
     dst.assign(src);
 }
 
@@ -679,12 +960,12 @@ test "zerod" {
         }
     }
 
-    var zerod = t2d.get(&[_]usize{ 0, 0 });
+    var zerod = t2d.get(.{ 0, 0 });
     try std.testing.expect(zerod.shape.len == 0);
     try std.testing.expectEqual(@as(f32, 0), zerod.item());
-    zerod = t2d.get(&[_]usize{ 0, 1 });
+    zerod = t2d.get(.{ 0, 1 });
     try std.testing.expectEqual(@as(f32, 1), zerod.item());
-    zerod = t2d.get(&[_]usize{ 1, 0 });
+    zerod = t2d.get(.{ 1, 0 });
     try std.testing.expectEqual(@as(f32, 4), zerod.item());
 
     var sc = Ndarray(f32).scalar(arena.allocator(), 16.0);
@@ -817,7 +1098,7 @@ test "dot prod" {
     const arr1 = [_]f32{ 0, 1, 2, 3 };
     const arr2 = [_]f32{ 1, 1, 2, 2 };
     var tens1 = Ndarray(f32).initFromSlice1d(arena.allocator(), &arr1);
-    var tens2 = Ndarray(f32).initFromSlice1d(arena.allocator(), &arr2);
+    const tens2 = Ndarray(f32).initFromSlice1d(arena.allocator(), &arr2);
     const s0 = Ndarray(f32).dot(alloc, tens1, tens1.zerosLike(alloc));
     try std.testing.expectEqual(@as(f32, 0), s0.item());
     const s1 = Ndarray(f32).dot(alloc, tens1, tens2);
@@ -827,7 +1108,7 @@ test "dot prod" {
         &[_]f32{ 1, 2, 3, 4 },
         &[_]f32{ 5, 5, 6, 7 },
     };
-    var mat = Ndarray(f32).initFromSlice2d(arena.allocator(), &mat2x4);
+    const mat = Ndarray(f32).initFromSlice2d(arena.allocator(), &mat2x4);
     const res = Ndarray(f32).dot(alloc, mat, tens1);
     try std.testing.expectEqualSlices(usize, &[_]usize{2}, res.shape);
     const ex = [_]f32{ 20, 38 };
@@ -878,4 +1159,67 @@ test "transpose" {
 
     const t2 = tens2d.transpose(arena.allocator(), .{});
     try std.testing.expectEqualSlices(usize, &[_]usize{ 4, 2 }, t2.shape);
+}
+
+test "tuple or slice access" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const mat2x4 = [_][]const f32{
+        &[_]f32{ 1, 2, 3, 4 },
+        &[_]f32{ 5, 6, 7, 8 },
+    };
+    var tens2d = Ndarray(f32).initFromSlice2d(arena.allocator(), &mat2x4);
+    for (0..2) |ri| {
+        for (0..4) |ci| {
+            try std.testing.expectEqual(mat2x4[ri][ci], tens2d.get(&[_]usize{ ri, ci }).item());
+            try std.testing.expectEqual(mat2x4[ri][ci], tens2d.get(.{ ri, ci }).item());
+        }
+        std.debug.print("\n", .{});
+    }
+}
+
+test "conv2d" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const N = 1;
+    const C = 1;
+    const C_out = 1;
+    var x = Ndarray(f32).init(arena.allocator(), &[_]usize{ N, C, 28, 28 });
+
+    for (0..28) |i| {
+        for (0..28) |j| {
+            const f: f32 = @floatFromInt(j);
+            const fi: f32 = @floatFromInt(i);
+            x.set(.{ 0, 0, i, j }, (f + 0.5) / 27.5 + fi);
+        }
+    }
+
+    const kernel = [_][]const f32{
+        &[_]f32{ 1, 2, 3 },
+        &[_]f32{ 4, 5, 6 },
+        &[_]f32{ 7, 8, 9 },
+    };
+    const ww = Ndarray(f32).initFromSlice2d(arena.allocator(), &kernel);
+
+    const w = Ndarray(f32).init(arena.allocator(), &[_]usize{ C_out, C, 3, 3 });
+    var wv = w.get(.{ 0, 0 });
+    wv.assign(ww);
+
+    const out = Ndarray(f32).conv2d(arena.allocator(), x, w, .{});
+    try std.testing.expectEqualSlices(usize, &[_]usize{ N, C_out, 28 - 2, 28 - 2 }, out.shape);
+
+    const expected = [_][]const f32{
+        &[_]f32{ 65.67273, 67.30909, 68.94545, 70.58182, 72.218185, 73.854546, 75.490906, 77.12727, 78.76363, 80.4, 82.03637, 83.67273, 85.30909, 86.94545, 88.581825, 90.21818, 91.854546, 93.49091, 95.12727, 96.76363, 98.399994, 100.03636, 101.67272, 103.3091, 104.94546, 106.58182 },
+        &[_]f32{ 110.67273, 112.30909, 113.94545, 115.58182, 117.218185, 118.854546, 120.490906, 122.127266, 123.76363, 125.4, 127.03636, 128.67273, 130.3091, 131.94545, 133.5818, 135.21817, 136.85455, 138.4909, 140.12727, 141.76364, 143.40001, 145.03638, 146.67273, 148.3091, 149.94545, 151.58182 },
+    };
+    for (0..2) |ri| {
+        var ov = out.get(.{ 0, 0, ri }).iterator(.{});
+        var idx: usize = 0;
+        while (ov.next()) |v| {
+            try std.testing.expectApproxEqRel(expected[ri][idx], v.*, 0.00001);
+            idx += 1;
+        }
+    }
 }

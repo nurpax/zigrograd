@@ -10,14 +10,11 @@ var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 12 }){};
 
 pub const Model = struct {
     linears: [3]nn.Layer,
-    bcast_tmp: []*zg.Tensor,
 
     pub const ParamIterator = nn.NestedModuleIterator(nn.Layer);
 
     pub fn init(pool: *zg.NodePool) Model {
-        var tmp = pool.arena.allocator().alloc(*zg.Tensor, 10) catch unreachable;
         return Model{
-            .bcast_tmp = tmp,
             .linears = .{
                 nn.Layer.init(pool, 28 * 28, 50, true),
                 nn.Layer.init(pool, 50, 50, true),
@@ -27,17 +24,81 @@ pub const Model = struct {
     }
 
     pub fn forward(self: *@This(), pool: *zg.NodePool, x: *const zg.Tensor) *zg.Tensor {
+        const N = x.shape()[0];
         var tmp = self.linears[0].forward(pool, x);
         tmp = self.linears[1].forward(pool, tmp);
         tmp = self.linears[2].forward(pool, tmp);
 
-        // logsoftmax = logits - log(reduce_sum(exp(logits), axis))
-        var softmax_sum = pool.sum(pool.exp(tmp), .{});
-        return pool.sub(tmp, pool.log(softmax_sum));
+        // logsoftmax = logits - log(reduce_sum(exp(logits), axis=1))
+        const softmax_sum = pool.sum(pool.exp(tmp), .{ .axis = 1 });
+        tmp = pool.sub(tmp, pool.reshape(pool.log(softmax_sum), &[_]usize{ N, 1 }));
+        return tmp;
     }
 
     pub fn parameters(self: *const @This()) ParamIterator {
         return ParamIterator.init(&self.linears);
+    }
+};
+
+pub const ModelCnn = struct {
+    convos: [2]nn.Conv2d,
+    fc1: nn.Layer,
+    iter_tmp: []*zg.Tensor,
+
+    pub const ParamIterator = nn.SliceIterator(*zg.Tensor);
+
+    pub fn init(pool: *zg.NodePool) ModelCnn {
+        var self = ModelCnn{
+            .convos = .{
+                nn.Conv2d.init(pool, 1, 32, 3, .{ .bias = true }),
+                nn.Conv2d.init(pool, 32, 64, 3, .{ .bias = true }),
+            },
+            .fc1 = nn.Layer.init(pool, 1600, 10, false),
+            .iter_tmp = undefined,
+        };
+        var params = std.ArrayList(*zg.Tensor).init(pool.arena.allocator());
+        for (self.convos) |t| {
+            var it = t.parameters();
+            while (it.next()) |v| {
+                params.append(v) catch unreachable;
+            }
+        }
+
+        var it = self.fc1.parameters();
+        while (it.next()) |v| {
+            params.append(v) catch unreachable;
+        }
+        self.iter_tmp = params.toOwnedSlice() catch unreachable;
+        return self;
+    }
+
+    pub fn forward(self: *@This(), pool: *zg.NodePool, x: *const zg.Tensor) *zg.Tensor {
+        const N = x.shape()[0];
+        const xr = pool.reshape(x, &[_]usize{ N, 1, 28, 28 });
+        var tmp = pool.relu(self.convos[0].forward(pool, xr));
+
+        tmp = pool.avgpool2d(tmp);
+
+        const conv1s = time.now();
+        tmp = pool.relu(self.convos[1].forward(pool, tmp));
+        const conv1 = time.since(conv1s);
+        _ = conv1;
+
+        tmp = pool.avgpool2d(tmp);
+        tmp = pool.reshape(tmp, &[_]usize{ N, 1600 });
+
+        tmp = self.fc1.forward(pool, tmp);
+
+        //std.debug.print("conv1 {d} ms\n", .{time.to_ms(conv1)});
+
+        // TODO maxpools
+        const softmax_sum = pool.sum(pool.exp(tmp), .{ .axis = 1 });
+        tmp = pool.sub(tmp, pool.reshape(pool.log(softmax_sum), &[_]usize{ N, 1 }));
+        return tmp;
+    }
+
+    pub fn parameters(self: *const @This()) ParamIterator {
+        return ParamIterator.init(self.iter_tmp);
     }
 };
 
@@ -52,7 +113,7 @@ fn samplesToBatch(pool: *zg.NodePool, samples: []mnist.MnistLoader.Sample) Ndarr
     return pixin;
 }
 
-fn validate(pool: *zg.NodePool, model: *Model, dataset: mnist.MnistLoader) void {
+fn validate(pool: *zg.NodePool, model: anytype, dataset: mnist.MnistLoader) void {
     const batch_size = 4;
     var correct_count: usize = 0;
     const max_samples = dataset.num_samples;
@@ -67,8 +128,8 @@ fn validate(pool: *zg.NodePool, model: *Model, dataset: mnist.MnistLoader) void 
         for (0..batch_size) |i| {
             samples[i] = dataset.sample(sample_idx * batch_size + i);
         }
-        var batch = samplesToBatch(pool, &samples);
-        var input = pool.tensor(batch);
+        const batch = samplesToBatch(pool, &samples);
+        const input = pool.tensor(batch);
         const logits = model.forward(pool, input);
 
         for (0..batch_size) |bidx| {
@@ -83,10 +144,11 @@ fn validate(pool: *zg.NodePool, model: *Model, dataset: mnist.MnistLoader) void 
 }
 
 pub fn trainClassifier(init_pool: *zg.NodePool, fwd: *zg.NodePool) void {
-    var model = Model.init(init_pool);
+    var model = ModelCnn.init(init_pool);
+    //var model = Model.init(init_pool);
 
     const batch_size = 32;
-    const num_epochs = 10;
+    const num_epochs = 20;
 
     const mnist_path = "data/mnist/";
     var loader = mnist.MnistLoader.open(gpa.allocator(), mnist_path, .train) catch {
@@ -138,7 +200,7 @@ pub fn trainClassifier(init_pool: *zg.NodePool, fwd: *zg.NodePool) void {
             }
 
             // Predict logits and compute loss.
-            var digits = fwd.tensor(samplesToBatch(fwd, &samples));
+            const digits = fwd.tensor(samplesToBatch(fwd, &samples));
             const pred = model.forward(fwd, digits);
             var loss = fwd.sum(fwd.neg(fwd.gatherSlice(pred, &labels)), .{});
             const mb_loss = loss.data.item() / batch_size;

@@ -46,6 +46,11 @@ pub const Conv2dGrads = struct {
     dx: Ndarray(f32),
 };
 
+pub const Maxpool2dRes = struct {
+    out: Ndarray(f32),
+    idx: []const u8,
+};
+
 pub fn Ndarray(comptime Dtype: type) type {
     return struct {
         buf: []Dtype,
@@ -883,6 +888,109 @@ pub fn Ndarray(comptime Dtype: type) type {
                             out.set(.{ n, c, i * 2 + 1, j * 2 }, v);
                             out.set(.{ n, c, i * 2, j * 2 + 1 }, v);
                             out.set(.{ n, c, i * 2 + 1, j * 2 + 1 }, v);
+                        }
+                    }
+                }
+            }
+            return out;
+        }
+
+        // x: Input  (shape: N, C, H, W)
+        // idx: Idx of the max element in 2x2 blocks of input
+        // hardcoded to kernel size 2, stride 2
+        pub fn maxpool2d(alloc: std.mem.Allocator, x: @This()) Maxpool2dRes {
+            std.debug.assert(x.shape.len == 4);
+            const N = x.shape[0];
+            const C = x.shape[1];
+            const H = x.shape[2];
+            const W = x.shape[3];
+
+            const h_out = H / 2;
+            const w_out = W / 2;
+            const out = @This().init(alloc, &[_]usize{ N, C, h_out, w_out });
+            const idx = alloc.alloc(u8, N * C * h_out * w_out) catch unreachable;
+
+            var out_slice = out.getContigousSlice(.{});
+            var out_idx: usize = 0;
+
+            for (0..N) |n| {
+                for (0..C) |c| {
+                    for (0..h_out) |ii| {
+                        var src = x.getContigousSlice(.{ n, c, ii * 2 }).ptr;
+                        for (0..w_out) |jj| {
+                            var i: u8 = 0;
+                            var a = src[0];
+                            const s01 = if (jj * 2 + 1 < W) src[1] else -std.math.inf(f32);
+                            const s10 = if (ii * 2 + 1 < H) src[x.strides[2]] else -std.math.inf(f32);
+                            const s11 = if (jj * 2 + 1 < W and ii * 2 + 1 < H) src[1 + x.strides[2]] else -std.math.inf(f32);
+
+                            if (s01 > a) {
+                                a = s01;
+                                i = 1;
+                            }
+
+                            if (s10 > a) {
+                                a = s10;
+                                i = 2;
+                            }
+
+                            if (s11 > a) {
+                                a = s11;
+                                i = 3;
+                            }
+
+                            out_slice[out_idx] = a;
+                            idx[out_idx] = i;
+                            out_idx += 1;
+                            src += 2;
+                        }
+                    }
+                }
+            }
+            return Maxpool2dRes{ .out = out, .idx = idx };
+        }
+
+        // x: Input  (shape: N, C, H, W)
+        pub fn maxpool2dBackwards(alloc: std.mem.Allocator, x: @This(), max_idx: []const u8, dout: @This()) @This() {
+            std.debug.assert(x.shape.len == 4);
+            const N = dout.shape[0];
+            const C = dout.shape[1];
+            const H = dout.shape[2];
+            const W = dout.shape[3];
+
+            const xH = x.shape[2];
+            const xW = x.shape[3];
+
+            const out = @This().init(alloc, &[_]usize{ N, C, x.shape[2], x.shape[3] });
+            var dout_idx: usize = 0;
+            var dout_it = dout.iterator(.{});
+
+            for (0..N) |n| {
+                for (0..C) |c| {
+                    const out_slice = out.getContigousSlice(.{ n, c });
+                    for (0..H) |i| {
+                        const out_idx = i * 2 * out.strides[2];
+                        for (0..W) |j| {
+                            const v = (dout_it.next() orelse unreachable).*;
+                            const m = max_idx[dout_idx];
+                            dout_idx += 1;
+
+                            const v00 = if (m == 0) v else 0;
+                            const v01 = if (m == 1) v else 0;
+                            const v10 = if (m == 2) v else 0;
+                            const v11 = if (m == 3) v else 0;
+
+                            out_slice[out_idx + j * 2 + 0] = v00;
+                            if (j * 1 + 1 < xW) {
+                                out_slice[out_idx + j * 2 + 1] = v01;
+                            }
+                            if (i * 2 + 1 < xH) {
+                                const s = out.strides[2];
+                                out_slice[out_idx + j * 2 + s] = v10;
+                                if (j * 2 + 1 < xW) {
+                                    out_slice[out_idx + j * 2 + s + 1] = v11;
+                                }
+                            }
                         }
                     }
                 }

@@ -77,14 +77,14 @@ pub const ModelCnn = struct {
         const xr = pool.reshape(x, &[_]usize{ N, 1, 28, 28 });
         var tmp = pool.relu(self.convos[0].forward(pool, xr));
 
-        tmp = pool.avgpool2d(tmp);
+        tmp = pool.maxpool2d(tmp);
 
         const conv1s = time.now();
         tmp = pool.relu(self.convos[1].forward(pool, tmp));
         const conv1 = time.since(conv1s);
         _ = conv1;
 
-        tmp = pool.avgpool2d(tmp);
+        tmp = pool.maxpool2d(tmp);
         tmp = pool.reshape(tmp, &[_]usize{ N, 1600 });
 
         tmp = self.fc1.forward(pool, tmp);

@@ -12,6 +12,7 @@ const ExprKind = enum {
     sum_axis,
     conv2d,
     avgpool2d,
+    maxpool2d,
     unop,
     binop,
 };
@@ -56,6 +57,10 @@ const Expr = union(ExprKind) {
     },
     avgpool2d: struct {
         arg0: *Tensor,
+    },
+    maxpool2d: struct {
+        arg0: *Tensor,
+        idx: []const u8, // max idx array for backwards pass
     },
     unop: struct {
         op: UnopKind,
@@ -214,6 +219,10 @@ pub const Tensor = struct {
                 const g = Ndarray(f32).avgpool2dBackwards(alloc, expr.arg0.data, self.grad);
                 expr.arg0.grad.add_(g);
             },
+            Expr.maxpool2d => |expr| {
+                const g = Ndarray(f32).maxpool2dBackwards(alloc, expr.arg0.data, expr.idx, self.grad);
+                expr.arg0.grad.add_(g);
+            },
         }
     }
     pub fn print(self: *const Tensor) void {
@@ -267,6 +276,9 @@ pub const Backward = struct {
                     self.backward_rec(op.arg_w);
                 },
                 Expr.avgpool2d => |op| {
+                    self.backward_rec(op.arg0);
+                },
+                Expr.maxpool2d => |op| {
                     self.backward_rec(op.arg0);
                 },
                 Expr.imm => {},
@@ -447,6 +459,11 @@ pub const NodePool = struct {
     pub fn avgpool2d(p: *NodePool, x: *const Tensor) *Tensor {
         const s = Ndarray(f32).avgpool2d(p.allocator(), x.data);
         return new(p, Expr{ .avgpool2d = .{ .arg0 = @constCast(x) } }, s);
+    }
+
+    pub fn maxpool2d(p: *NodePool, x: *const Tensor) *Tensor {
+        const res = Ndarray(f32).maxpool2d(p.allocator(), x.data);
+        return new(p, Expr{ .maxpool2d = .{ .arg0 = @constCast(x), .idx = res.idx } }, res.out);
     }
 };
 

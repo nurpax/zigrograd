@@ -31,7 +31,7 @@ pub const Model = struct {
 
         // logsoftmax = logits - log(reduce_sum(exp(logits), axis=1))
         const softmax_sum = pool.sum(pool.exp(tmp), .{ .axis = 1 });
-        tmp = pool.sub(tmp, pool.reshape(pool.log(softmax_sum), &[_]usize{ N, 1 }));
+        tmp = pool.sub(tmp, pool.reshape(pool.log(softmax_sum), .{ N, 1 }));
         return tmp;
     }
 
@@ -74,7 +74,7 @@ pub const ModelCnn = struct {
 
     pub fn forward(self: *@This(), pool: *zg.NodePool, x: *const zg.Tensor) *zg.Tensor {
         const N = x.shape()[0];
-        const xr = pool.reshape(x, &[_]usize{ N, 1, 28, 28 });
+        const xr = pool.reshape(x, .{ N, 1, 28, 28 });
         var tmp = pool.relu(self.convos[0].forward(pool, xr));
 
         tmp = pool.maxpool2d(tmp);
@@ -83,17 +83,17 @@ pub const ModelCnn = struct {
         tmp = pool.relu(self.convos[1].forward(pool, tmp));
         const conv1 = time.since(conv1s);
         _ = conv1;
+        //std.debug.print("conv2d fwd {d} ms\n", .{time.to_ms(conv1)});
 
         tmp = pool.maxpool2d(tmp);
-        tmp = pool.reshape(tmp, &[_]usize{ N, 1600 });
+        tmp = pool.reshape(tmp, .{ N, -1 });
 
         tmp = self.fc1.forward(pool, tmp);
 
         //std.debug.print("conv1 {d} ms\n", .{time.to_ms(conv1)});
 
-        // TODO maxpools
         const softmax_sum = pool.sum(pool.exp(tmp), .{ .axis = 1 });
-        tmp = pool.sub(tmp, pool.reshape(pool.log(softmax_sum), &[_]usize{ N, 1 }));
+        tmp = pool.sub(tmp, pool.reshape(pool.log(softmax_sum), .{ N, 1 }));
         return tmp;
     }
 
@@ -107,7 +107,7 @@ fn samplesToBatch(pool: *zg.NodePool, samples: []mnist.MnistLoader.Sample) Ndarr
     for (samples, 0..) |s, j| {
         for (s.pixels, 0..) |pix, i| {
             const fpix: f32 = @floatFromInt(pix);
-            pixin.set(.{ j, i }, fpix / 127.5 - 1);
+            pixin.setItem(.{ j, i }, fpix / 127.5 - 1);
         }
     }
     return pixin;
@@ -148,7 +148,7 @@ pub fn trainClassifier(init_pool: *zg.NodePool, fwd: *zg.NodePool) void {
     //var model = Model.init(init_pool);
 
     const batch_size = 32;
-    const num_epochs = 20;
+    const num_epochs = 10;
 
     const mnist_path = "data/mnist/";
     var loader = mnist.MnistLoader.open(gpa.allocator(), mnist_path, .train) catch {
@@ -174,6 +174,7 @@ pub fn trainClassifier(init_pool: *zg.NodePool, fwd: *zg.NodePool) void {
 
     std.debug.print("model size: {d}\n", .{model.parameters().len()});
 
+    const train_start: i64 = std.time.milliTimestamp();
     var tick_start_time: i64 = std.time.microTimestamp();
     for (0..num_epochs) |epoch_idx| {
 
@@ -215,21 +216,21 @@ pub fn trainClassifier(init_pool: *zg.NodePool, fwd: *zg.NodePool) void {
                 p.data.sub_(p.grad);
             }
 
-            if (batch_idx % 5 != 0) {
+            const B = 25;
+            if (batch_idx % B != 0) {
                 continue;
             }
 
             const elapsed = (@as(f64, @floatFromInt(std.time.microTimestamp() - tick_start_time)) / 1e6);
-            const sec_per_kimg = elapsed / (@as(f64, batch_size * 5) / 1000);
+            const sec_per_kimg = elapsed / (@as(f64, batch_size * B) / 1000);
             std.debug.print("epoch {d:<2} sample {d:<6} loss {d:.5} elapsed {d:.3} sec/kimg {d:.3}\n", .{ epoch_idx, batch_idx * batch_size, mb_loss, elapsed, sec_per_kimg });
-
-            if (batch_idx != 0 and batch_idx % 100 == 0) {
-                validate(fwd, &model, val_loader);
-            }
             tick_start_time = std.time.microTimestamp();
         }
+        validate(fwd, &model, val_loader);
     }
-    validate(fwd, &model, val_loader);
+
+    const elapsed = std.time.milliTimestamp() - train_start;
+    std.debug.print("training completed in {d} seconds\n", .{@as(f64, @floatFromInt(elapsed)) / 1e3});
 }
 
 pub fn main() !void {

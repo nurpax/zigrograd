@@ -14,7 +14,7 @@ pub const Binop = enum {
     relu_bw,
 };
 
-pub fn unopScalar(op: Unop, a: f32) f32 {
+pub fn unopScalar(comptime op: Unop, a: f32) f32 {
     return switch (op) {
         Unop.neg => -a,
         Unop.exp => @exp(a),
@@ -22,7 +22,7 @@ pub fn unopScalar(op: Unop, a: f32) f32 {
     };
 }
 
-pub fn binopScalar(op: Binop, a: f32, b: f32) f32 {
+pub fn binopScalar(comptime op: Binop, a: f32, b: f32) f32 {
     return switch (op) {
         Binop.add => a + b,
         Binop.sub => a - b,
@@ -32,7 +32,7 @@ pub fn binopScalar(op: Binop, a: f32, b: f32) f32 {
     };
 }
 
-pub fn unop(op: Unop, d: []f32, d_stride: usize, count: usize, a: []const f32, a_stride: usize) void {
+pub fn unop(comptime op: Unop, d: []f32, d_stride: usize, count: usize, a: []const f32, a_stride: usize) void {
     var d_offs: usize = 0;
     var a_offs: usize = 0;
     for (0..count) |_| {
@@ -42,7 +42,7 @@ pub fn unop(op: Unop, d: []f32, d_stride: usize, count: usize, a: []const f32, a
     }
 }
 
-pub fn binop(op: Binop, d: []f32, d_stride: usize, count: usize, a: []const f32, a_stride: usize, b: []const f32, b_stride: usize) void {
+pub fn binop(comptime op: Binop, d: []f32, d_stride: usize, count: usize, a: []const f32, a_stride: usize, b: []const f32, b_stride: usize) void {
     var d_offs: usize = 0;
     var a_offs: usize = 0;
     var b_offs: usize = 0;
@@ -54,7 +54,7 @@ pub fn binop(op: Binop, d: []f32, d_stride: usize, count: usize, a: []const f32,
     }
 }
 
-pub fn binop_(op: Binop, d: []f32, d_stride: usize, count: usize, a: []const f32, a_stride: usize) void {
+pub fn binop_(comptime op: Binop, d: []f32, d_stride: usize, count: usize, a: []const f32, a_stride: usize) void {
     var d_offs: usize = 0;
     var a_offs: usize = 0;
     for (0..count) |_| {
@@ -64,10 +64,38 @@ pub fn binop_(op: Binop, d: []f32, d_stride: usize, count: usize, a: []const f32
     }
 }
 
-// dst[...] += src[...] * constant
-pub fn addMulConstStride1_(d: []f32, count: usize, a: []const f32, c: f32) void {
-    for (0..count) |i| {
-        d[i] += a[i] * c;
+pub fn addContiguous(d: []f32, N: usize, a: []const f32, b: []const f32) void {
+    const rem = N & 3;
+    const count4 = N >> 2;
+    var dstp = d.ptr;
+    var ap = a.ptr;
+    var bp = b.ptr;
+    for (0..count4) |_| {
+        const av: @Vector(4, f32) = ap[0..4].*;
+        const bv: @Vector(4, f32) = bp[0..4].*;
+        dstp[0..4].* = av + bv;
+        dstp += 4;
+        ap += 4;
+        bp += 4;
+    }
+    for (0..rem) |j| {
+        dstp[j] = ap[j] + bp[j];
+    }
+}
+
+pub fn addContiguous_(d: []f32, N: usize, a: []const f32) void {
+    const rem = N & 3;
+    const count4 = N >> 2;
+    var dstp = d.ptr;
+    var ap = a.ptr;
+    for (0..count4) |_| {
+        const av: @Vector(4, f32) = ap[0..4].*;
+        dstp[0..4].* += av;
+        dstp += 4;
+        ap += 4;
+    }
+    for (0..rem) |j| {
+        dstp[j] += ap[j];
     }
 }
 
@@ -120,4 +148,19 @@ pub fn innerProductStride1(a: [*]f32, count: usize, b: [*]f32) f32 {
         idx += 1;
     }
     return totalf;
+}
+
+// dst is shaped MxN and contiguous, source is strided.
+// TODO not cache efficient
+pub fn transpose2dStrided(dst: []f32, M: usize, N: usize, src: []const f32, src_stride0: usize, src_stride1: usize) void {
+    const src_ptr = src.ptr;
+    var dst_ptr = dst.ptr;
+    for (0..M) |i| {
+        var srcp = src_ptr + i * src_stride0;
+        for (0..N) |j| {
+            dst_ptr[j] = srcp[0];
+            srcp += src_stride1;
+        }
+        dst_ptr += N;
+    }
 }

@@ -112,7 +112,7 @@ criterion = nn.CrossEntropyLoss()
 
 print(model)
 
-epochs = 20
+epochs = 10
 
 lossv, accv = [], []
 for epoch in range(1, epochs + 1):

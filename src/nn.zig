@@ -81,9 +81,9 @@ pub const Layer = struct {
         var w = Ndarray(f32).init(pool.arena.allocator(), &[_]usize{ num_out, num_in });
         var b = Ndarray(f32).init(pool.arena.allocator(), &[_]usize{num_out});
         for (0..num_out) |j| {
-            b.set(.{j}, (zg.Random.uniform() * 2 - 1) * scl);
+            b.setItem(.{j}, (zg.Random.uniform() * 2 - 1) * scl);
             for (0..num_in) |i| {
-                w.set(.{ j, i }, (zg.Random.uniform() * 2 - 1) * scl);
+                w.setItem(.{ j, i }, (zg.Random.uniform() * 2 - 1) * scl);
             }
         }
 
@@ -127,12 +127,12 @@ pub const Conv2d = struct {
         const b = if (opts.bias) Ndarray(f32).init(pool.arena.allocator(), &[_]usize{num_out}) else null;
         for (0..num_out) |i| {
             if (b) |bb| {
-                bb.set(.{i}, (zg.Random.uniform() * 2 - 1) * scl);
+                bb.setItem(.{i}, (zg.Random.uniform() * 2 - 1) * scl);
             }
             for (0..num_in) |j| {
                 for (0..kernel) |kj| {
                     for (0..kernel) |ki| {
-                        w.set(.{ i, j, kj, ki }, (zg.Random.uniform() * 2 - 1) * scl);
+                        w.setItem(.{ i, j, kj, ki }, (zg.Random.uniform() * 2 - 1) * scl);
                     }
                 }
             }

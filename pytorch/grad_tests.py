@@ -1,8 +1,12 @@
+from typing import Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+
+def print_int_slice(xs: Union[torch.Size,list[int]], name):
+    print(f'const {name}_val = [_]usize{{{", ".join([str(x) for x in xs])}}};')
 
 def print_f32_slice(tensor: torch.Tensor, name):
     xs = tensor.detach().numpy().flatten()
@@ -43,6 +47,49 @@ def conv2d_test():
     print_f32_slice(weight.grad, 'dw_expected')
     print_f32_slice(x.grad, 'dx_expected')
 
+def matmul_test():
+    print('matmul:')
+
+    a = np.random.randn(3, 8)
+    b = np.random.randn(8, 3)
+
+    a = torch.tensor(a, requires_grad=True)
+    b = torch.tensor(b, requires_grad=True)
+
+    out = a @ b
+
+    loss = out.sum()
+    loss.backward()
+    print('out shape', out.shape)
+    print('da', a.grad)
+    print('db', b.grad)
+
+    # print zig test case
+    print_tensor_init(a, 'a')
+    print_tensor_init(b, 'b')
+    print_f32_slice(out, 'out_expected')
+    assert a.grad is not None and b.grad is not None
+    print_f32_slice(a.grad, 'db_expected')
+    print_f32_slice(b.grad, 'da_expected')
+
+def unfold_test():
+    print('unfold:')
+
+    a = np.random.randn(2, 8, 10)
+    a = torch.tensor(a)
+
+    unfolded = F.unfold(a, 3)
+
+    # print zig test case
+    print_tensor_init(a, 'a')
+    print_f32_slice(unfolded, 'out_expected')
+    print_int_slice(list(unfolded.shape), 'out_shape')
+
+    folded = F.fold(unfolded, a.shape[1:], 3)
+    print(folded.shape)
+    print_f32_slice(folded, 'folded_expected')
+    print_int_slice(list(folded.shape), 'folded_shape')
+
 
 def avgpool2d_test():
     x = (0.5+np.arange(8, dtype=np.float32))/7.5
@@ -62,6 +109,8 @@ def main():
     np.random.seed(0x43534)
     conv2d_test()
     avgpool2d_test()
+    matmul_test()
+    unfold_test()
     return
     x = (0.5+np.arange(28, dtype=np.float32))/27.5
     x = np.stack([x + i for i in range(28)])

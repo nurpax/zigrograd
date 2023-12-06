@@ -3,10 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import datasets, transforms
 
-if torch.cuda.is_available():
-    device = torch.device('cuda')
-else:
-    device = torch.device('cpu')
+device = torch.device('cpu')
 
 print('Using PyTorch version:', torch.__version__, ' Device:', device)
 

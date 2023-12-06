@@ -156,17 +156,13 @@ pub const Tensor = struct {
                         expr.arg1.grad.add_(unbroadcast(alloc, expr.arg1.grad, b));
                     },
                     BinopKind.dot => {
-                        var op_a = expr.arg0.data;
-                        var op_b = expr.arg1.data;
+                        const op_a = expr.arg0.data;
+                        const op_b = expr.arg1.data;
                         const prev_grad = self.grad;
 
-                        const a = Ndarray(f32).dot(alloc, prev_grad, op_b.transpose(alloc, .{}));
-                        std.debug.assert(Ndarray(f32).equalShapes(a, expr.arg0.data));
-                        expr.arg0.grad.add_(a);
-
-                        const b = Ndarray(f32).dot(alloc, op_a.transpose(alloc, .{}), prev_grad);
-                        std.debug.assert(Ndarray(f32).equalShapes(b, expr.arg1.data));
-                        expr.arg1.grad.add_(b);
+                        const op_bT = op_b.transpose(alloc, .{}).clone(alloc); // clone(): linearize for addmm_
+                        expr.arg0.grad.addmm_(prev_grad, op_bT, .{});
+                        expr.arg1.grad.addmm_(op_a, prev_grad, .{ .transpose_a = true });
                     },
                     // BinopKind.pow_imm => {
                     //     std.debug.assert(expr.arg1.expr == .imm); // only immediate field supported for now
@@ -420,14 +416,14 @@ pub const NodePool = struct {
         const idx_copy = p.allocator().dupe(usize, idx) catch unreachable;
         var data = Ndarray(f32).init(p.allocator(), &[_]usize{mb_size});
         for (0..data.shape[0]) |i| {
-            data.set(.{i}, a.data.get(&[_]usize{ i, idx[i] }).item());
+            data.setItem(.{i}, a.data.get(&[_]usize{ i, idx[i] }).item());
         }
         return new(p, Expr{ .gather_slice = .{ .arg = @constCast(a), .idx = idx_copy } }, data);
     }
 
-    pub fn reshape(p: *NodePool, a: *const Tensor, order: []const usize) *Tensor {
-        const order_copy = p.allocator().dupe(usize, order) catch unreachable;
-        return new(p, Expr{ .reshape = .{ .arg0 = @constCast(a), .order = order_copy } }, a.data.reshape(p.allocator(), order));
+    pub fn reshape(p: *NodePool, a: *const Tensor, order: anytype) *Tensor {
+        const new_order = ndarray.inferShape(p.allocator(), a.data.shape, order);
+        return new(p, Expr{ .reshape = .{ .arg0 = @constCast(a), .order = new_order } }, a.data.reshape(p.allocator(), new_order));
     }
 
     // Hardcoded for axis=0
@@ -529,7 +525,7 @@ test "stack" {
     var t2d = Ndarray(f32).init(h.arena.allocator(), &[_]usize{ 2, 4 });
     for (0..t2d.shape[0]) |yi| {
         for (0..t2d.shape[1]) |xi| {
-            t2d.set(.{ yi, xi }, @floatFromInt(xi + yi * 10));
+            t2d.setItem(.{ yi, xi }, @floatFromInt(xi + yi * 10));
         }
     }
     const tt = h.tensor(t2d);
@@ -550,7 +546,7 @@ test "conv2d" {
         for (0..28) |j| {
             const f: f32 = @floatFromInt(j);
             const fi: f32 = @floatFromInt(i);
-            x.set(.{ 0, 0, i, j }, (f + 0.5) / 27.5 + fi);
+            x.setItem(.{ 0, 0, i, j }, (f + 0.5) / 27.5 + fi);
         }
     }
 
@@ -591,7 +587,7 @@ test "avgpool2d" {
         for (0..8) |j| {
             const f: f32 = @floatFromInt(j);
             const fi: f32 = @floatFromInt(i);
-            x.set(.{ 0, 0, i, j }, (f + 0.5) / 7.5 + fi);
+            x.setItem(.{ 0, 0, i, j }, (f + 0.5) / 7.5 + fi);
         }
     }
 
@@ -644,7 +640,7 @@ test "conv2d_advanced" {
     const out = h.conv2d(x, w, .{});
     const loss = h.sum(out, .{});
 
-    const flat_out = out.data.reshape(h.allocator(), &[_]usize{Ndarray(f32).shapeProd(out.shape())});
+    const flat_out = out.data.reshape(h.allocator(), .{-1});
 
     try std.testing.expect(flat_out.shape.len == 1 and flat_out.shape[0] == out_expected_val.len);
 
@@ -656,12 +652,12 @@ test "conv2d_advanced" {
     defer bw.deinit();
     bw.backward(h.allocator(), loss);
 
-    const flat_dx = x.grad.reshape(h.allocator(), &[_]usize{Ndarray(f32).shapeProd(x.grad.shape)});
+    const flat_dx = x.grad.reshape(h.allocator(), .{-1});
     for (dx_expected_val, flat_dx.getContigousSlice(.{})) |expected, actual| {
         try std.testing.expectApproxEqRel(expected, actual, 0.00001);
     }
 
-    const flat_dw = w.grad.reshape(h.allocator(), &[_]usize{Ndarray(f32).shapeProd(w.grad.shape)});
+    const flat_dw = w.grad.reshape(h.allocator(), .{-1});
     std.debug.print("\n", .{});
     for (dw_expected_val, flat_dw.getContigousSlice(.{})) |expected, actual| {
         try std.testing.expectApproxEqRel(expected, actual, 0.00001);
